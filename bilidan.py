@@ -57,7 +57,7 @@ APPSEC = '2ad42749773c441109bdc0191257a664'  # Do not abuse please, get one your
 BILIGRAB_HEADER = {'User-Agent': USER_AGENT_API, 'Cache-Control': 'no-cache', 'Pragma': 'no-cache'}
 
 
-def biligrab(url, *, debug=False, verbose=False, media=None, cookie=None, quality=None, source=None, mpvflags=[], d2aflags={}):
+def biligrab(url, *, debug=False, verbose=False, media=None, cookie=None, quality=None, source=None, keep_fps=False, mpvflags=[], d2aflags={}, fakeip=None):
 
     url_get_metadata = 'http://api.bilibili.com/view?'
     url_get_comment = 'http://comment.bilibili.com/%(cid)s.xml'
@@ -112,7 +112,7 @@ def biligrab(url, *, debug=False, verbose=False, media=None, cookie=None, qualit
             if quality is not None:
                 req_args['quality'] = quality
             req_args['sign'] = bilibili_hash(req_args)
-            _, response = fetch_url(url_get_media+urllib.parse.urlencode(req_args), user_agent=user_agent, cookie=cookie)
+            _, response = fetch_url(url_get_media+urllib.parse.urlencode(req_args), user_agent=user_agent, cookie=cookie, fakeip=fakeip)
             media_urls = [str(k.wholeText).strip() for i in xml.dom.minidom.parseString(response.decode('utf-8', 'replace')).getElementsByTagName('durl') for j in i.getElementsByTagName('url')[:1] for k in j.childNodes if k.nodeType == 4]
             if not fuck_you_bishi_mode and media_urls == ['http://static.hdslb.com/error.mp4']:
                 logging.error('Detected User-Agent block. Switching to fuck-you-bishi mode.')
@@ -120,7 +120,7 @@ def biligrab(url, *, debug=False, verbose=False, media=None, cookie=None, qualit
         elif source == 'html5':
             req_args = {'aid': aid, 'page': pid}
             logging.warning('HTML5 video source is experimental and may not always work.')
-            _, response = fetch_url('http://m.acg.tv/m/html5?'+urllib.parse.urlencode(req_args), user_agent=USER_AGENT_PLAYER)
+            _, response = fetch_url('http://www.bilibili.com/m/html5?'+urllib.parse.urlencode(req_args), user_agent=USER_AGENT_PLAYER)
             response = json.loads(response.decode('utf-8', 'replace'))
             media_urls = [dict.get(response, 'src')]
             if not media_urls[0]:
@@ -194,10 +194,10 @@ def biligrab(url, *, debug=False, verbose=False, media=None, cookie=None, qualit
         '''
         _, resp_comment = fetch_url(url_get_comment % {'cid': cid}, cookie=cookie)
         comment_in = io.StringIO(resp_comment.decode('utf-8', 'replace'))
-        comment_out = tempfile.NamedTemporaryFile(mode='w', encoding='utf-8-sig', newline='\r\n', prefix='tmp-danmaku2ass-', suffix='.ass')
+        comment_out = tempfile.NamedTemporaryFile(mode='w', encoding='utf-8-sig', newline='\r\n', prefix='tmp-danmaku2ass-', suffix='.ass', delete=False)
         logging.info('Invoking Danmaku2ASS, converting to %s' % comment_out.name)
         d2a_args = dict({'stage_width': video_size[0], 'stage_height': video_size[1], 'font_face': 'Microsoft YaHei', 'font_size': math.ceil(video_size[1]/21.6), 'text_opacity': 0.8, 'duration_marquee': min(max(6.75*video_size[0]/video_size[1]-4, 3.0), 8.0), 'duration_still': 5.0}, **d2aflags)
-        for i, j in ((('stage_width', 'stage_height', 'reserve_blank'), int), (('font_size', 'text_opacity', 'comment_duration'), float)):
+        for i, j in ((('stage_width', 'stage_height', 'reserve_blank'), int), (('font_size', 'text_opacity', 'comment_duration', 'duration_still', 'duration_marquee'), float)):
             for k in i:
                 if k in d2aflags:
                     d2a_args[k] = j(d2aflags[k])
@@ -207,9 +207,10 @@ def biligrab(url, *, debug=False, verbose=False, media=None, cookie=None, qualit
             log_or_raise(e, debug=debug)
             logging.error('Danmaku2ASS failed, comments are disabled.')
         comment_out.flush()
+        comment_out.close()  # Close the temporary file early to fix an issue related to Windows NT file sharing
         return comment_out
 
-    def launch_player(video_metadata, media_urls, comment_out, is_playlist=False):
+    def launch_player(video_metadata, media_urls, comment_out, is_playlist=False, increase_fps=True):
         '''Launch MPV media player
 
         Arguments: video_metadata, media_urls, comment_out
@@ -217,24 +218,29 @@ def biligrab(url, *, debug=False, verbose=False, media=None, cookie=None, qualit
         Return value: player_exit_code -> int
         '''
         mpv_version_master = tuple(check_env.mpv_version.split('-', 1)[0].split('.'))
-        mpv_version_gte_0_6 = mpv_version_master >= ('0', '6') or (len(mpv_version_master) >= 2 and len(mpv_version_master[1]) >= 2) or mpv_version_master[0] == 'git'
+        mpv_version_gte_0_10 = mpv_version_master >= ('0', '10') or (len(mpv_version_master) >= 2 and len(mpv_version_master[1]) >= 3) or mpv_version_master[0] == 'git'
+        mpv_version_gte_0_6 = mpv_version_gte_0_10 or mpv_version_master >= ('0', '6') or (len(mpv_version_master) >= 2 and len(mpv_version_master[1]) >= 2) or mpv_version_master[0] == 'git'
         mpv_version_gte_0_4 = mpv_version_gte_0_6 or mpv_version_master >= ('0', '4') or (len(mpv_version_master) >= 2 and len(mpv_version_master[1]) >= 2) or mpv_version_master[0] == 'git'
+        logging.debug('Compare mpv version: %s %s 0.10' % (check_env.mpv_version, '>=' if mpv_version_gte_0_10 else '<'))
         logging.debug('Compare mpv version: %s %s 0.6' % (check_env.mpv_version, '>=' if mpv_version_gte_0_6 else '<'))
         logging.debug('Compare mpv version: %s %s 0.4' % (check_env.mpv_version, '>=' if mpv_version_gte_0_4 else '<'))
-        increase_fps = True
-        for i in mpvflags:
-            i = i.split('=', 1)
-            if 'vdpau' in i or 'vaapi' in i or 'vda' in i:
-                increase_fps = False
-                break
+        if increase_fps:  # If hardware decoding (without -copy suffix) is used, do not increase fps
+            for i in mpvflags:
+                i = i.split('=', 1)
+                if 'vdpau' in i or 'vaapi' in i or 'vda' in i:
+                    increase_fps = False
+                    break
         command_line = ['mpv', '--autofit', '950x540']
         if mpv_version_gte_0_6:
             command_line += ['--cache-file', 'TMP', '--cache-default', '1000000']
-        if increase_fps and mpv_version_gte_0_6:
+        if increase_fps and mpv_version_gte_0_6:  # Drop frames at vo side but not at decoder side to prevent A/V sync issues
             command_line += ['--framedrop', 'vo']
         command_line += ['--http-header-fields', 'User-Agent: '+USER_AGENT_PLAYER.replace(',', '\\,')]
         if mpv_version_gte_0_6:
-            command_line += ['--media-title', video_metadata.get('title', url)]
+            if mpv_version_gte_0_10:
+                command_line += ['--force-media-title', video_metadata.get('title', url)]
+            else:
+                command_line += ['--media-title', video_metadata.get('title', url)]
         if is_playlist or len(media_urls) > 1:
             command_line += ['--merge-files']
         if mpv_version_gte_0_4:
@@ -244,7 +250,7 @@ def biligrab(url, *, debug=False, verbose=False, media=None, cookie=None, qualit
         if increase_fps:
             if mpv_version_gte_0_6:
                 command_line += ['--vf', 'lavfi="fps=fps=60:round=down"']
-            else:
+            else:  # Versions < 0.6 have an A/V sync related issue
                 command_line += ['--vf', 'lavfi="fps=fps=50:round=down"']
         command_line += mpvflags
         if is_playlist:
@@ -296,12 +302,15 @@ def biligrab(url, *, debug=False, verbose=False, media=None, cookie=None, qualit
     comment_out = convert_comments(video_metadata['cid'], video_size)
 
     logging.info('Launching media player...')
-    player_exit_code = launch_player(video_metadata, media_urls, comment_out)
-    comment_out.close()
+    player_exit_code = launch_player(video_metadata, media_urls, comment_out, increase_fps=not keep_fps)
+
+    if player_exit_code == 0:
+        os.remove(comment_out.name)
+
     return player_exit_code
 
 
-def fetch_url(url, *, user_agent=USER_AGENT_PLAYER, cookie=None):
+def fetch_url(url, *, user_agent=USER_AGENT_PLAYER, cookie=None, fakeip=None):
     '''Fetch HTTP URL
 
     Arguments: url, user_agent, cookie
@@ -312,6 +321,9 @@ def fetch_url(url, *, user_agent=USER_AGENT_PLAYER, cookie=None):
     req_headers = {'User-Agent': user_agent, 'Accept-Encoding': 'gzip, deflate'}
     if cookie:
         req_headers['Cookie'] = cookie
+    if fakeip:
+        req_headers['X-Forwarded-For'] = fakeip
+        req_headers['Client-IP'] = fakeip
     req = urllib.request.Request(url=url, headers=req_headers)
     response = urllib.request.urlopen(req, timeout=120)
     content_encoding = response.getheader('Content-Encoding')
@@ -371,7 +383,7 @@ def check_env(debug=False):
                 logging.debug('Detected mpv version: %s' % check_env.mpv_version)
                 break
         else:
-            log_or_raise('Can not detect mpv version.', debug=debug)
+            log_or_raise(RuntimeError('Can not detect mpv version.'), debug=debug)
             check_env.mpv_version = 'git-'
     except OSError as e:
         logging.error('Please install \'mpv\' as the media player.')
@@ -430,8 +442,10 @@ def main():
                                                'overseas: CDN acceleration for users outside china\n' +
                                                'flvcd: Video parsing service provided by FLVCD.com\n' +
                                                'html5: Low quality video provided by m.acg.tv for mobile users')
+    parser.add_argument('-f', '--fakeip', help='Fake ip for bypassing restrictions.')
     parser.add_argument('-v', '--verbose', action='store_true', help='Print more debugging information')
     parser.add_argument('--hd', action='store_true', help='Shorthand for -q 4')
+    parser.add_argument('--keep-fps', action='store_true', help='Use the same framerate as the video to animate comments, instead of increasing to 60 fps')
     parser.add_argument('--mpvflags', metavar='FLAGS', default='', help='Parameters passed to mpv, formed as \'--option1=value1 --option2=value2\'')
     parser.add_argument('--d2aflags', '--danmaku2assflags', metavar='FLAGS', default='', help='Parameters passed to Danmaku2ASS, formed as \'option1=value1,option2=value2\'')
     parser.add_argument('url', metavar='URL', nargs='+', help='Bilibili video page URL (http://www.bilibili.com/video/av*/)')
@@ -445,10 +459,11 @@ def main():
         raise ValueError('invalid value specified for --source, see --help for more information')
     mpvflags = args.mpvflags.split()
     d2aflags = dict((i.split('=', 1) if '=' in i else [i, ''] for i in args.d2aflags.split(','))) if args.d2aflags else {}
+    fakeip = args.fakeip if args.fakeip else None
     retval = 0
     for url in args.url:
         try:
-            retval = retval or biligrab(url, debug=args.debug, verbose=args.verbose, media=args.media, cookie=args.cookie, quality=quality, source=source, mpvflags=mpvflags, d2aflags=d2aflags)
+            retval = retval or biligrab(url, debug=args.debug, verbose=args.verbose, media=args.media, cookie=args.cookie, quality=quality, source=source, keep_fps=args.keep_fps, mpvflags=mpvflags, d2aflags=d2aflags, fakeip=args.fakeip)
         except OSError as e:
             logging.error(e)
             retval = retval or e.errno
